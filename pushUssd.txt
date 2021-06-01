@@ -1,0 +1,1307 @@
+<?
+ini_set("error_reporting",E_ALL);
+ini_set('display_errors',1);
+include("includes/config.php");
+include("ussdJsonOld.php");
+include('staticClassUssd');
+include('nusoap/lib/nusoap.php');
+header("Content-Type:application/json");
+
+/**
+ * 
+ */
+class ussdPullMode extends parseUssdJson
+{ 
+	private $sess_id;
+	private $ussdstring;
+	private $msisdn;
+	private $redis;
+	private $rdb;
+	private $menu;
+	private $menu_id;
+	private $arr;
+	private $admin_id;
+	///echo "TALHA";
+	//private $connectHere;
+	private $counter;
+	private $my_msisdn;
+	private $sc;
+	private $conn;
+	private $score;
+	private $allowedSessions;
+	private $clientID;
+	private $allowedlevels;
+	function __construct($sess_id="",$ussdstring="",$msisdn="",$con,$aid,$nature="")
+	{
+		$this->conn=$con;	
+		$this->redis=new Redis();
+		$this->redis->connect('172.27.108.60');
+		$this->ussdstring=$ussdstring;
+		$this->score = time() + 60;
+		$this->redis->select(1);
+		//$this->allowedSessions='10';
+
+		$this->clientID="adminid_".$aid;
+		$this->sess_id=$sess_id;
+		$this->my_msisdn=$msisdn;
+		try
+		{
+			if($this->redis->exists($this->clientID))
+			{
+				$currentCount=$this->redis->zCount($this->clientID, "-inf", "+inf");
+				$this->redis->zRemRangeByScore($this->clientID, "-inf", time());
+				if($nature=='newPull')
+				{
+					//echo "HereNEw";
+
+					if($this->canTraverse($con,$aid))
+					{
+					if($currentCount<=$this->allowedSessions)
+					{
+					if($this->redis->zScore($this->clientID,$sess_id)==false)
+					{
+					$code= substr($ussdstring, 1, -1);
+					mysql_select_db('ussd_cmt',$con);
+					$sqlGetTypeDetails=mysql_query("SELECT * from ussd_sc_menu_map Where ussd_short_code='$code'",$con);
+					$res=mysql_fetch_array($sqlGetTypeDetails);
+					$ussdType=$res['ussd_type'];
+					$ussdApiUrl=$res['api_url'];
+					$ussdAdminId=$res['admin_id'];
+					$ussdAPImethod=$res['api_type'];
+					$apinature=$res['type_of_api'];
+					if($ussdType=="API")
+					{
+					$apiResponse=$this->initiateWebHook($ussdApiUrl,$this->ussdstring,$adminUsername,$adminPass,$this->my_msisdn,$ussdAPImethod,$sess_id);
+					$webhookMenu="Complete";
+					if($apiResponse['isfinal']!="true")
+					{
+					$arr['ussdType']='WEBHOOK';
+					$webhookMenu="Incomplete";
+					//$arr['status']=$status;
+					$arr['ussdstring']=$apiResponse['ussdstring'];
+					$arr['webHookurl']=$ussdApiUrl;
+					$arr['apiMethod']=$ussdAPImethod;
+					$arr['shortCode']=$this->ussdstring;
+					$arr['isfinal']=$apiResponse['isfinal'];
+					$arr['counter']='1';
+					//$this->counter='1';
+					$this->redis->zAdd($this->clientID,$this->score,$sess_id);
+					$this->redis->select(0);
+					$this->redis->HMSET($sess_id,$arr);
+					$this->redis->expire($sess_id,60);
+					//echo $arr['ussdstring'];*/
+					
+				    }
+				    $hereArr[$arr['counter']]=['menu_shown'=>$arr['ussdstring'],'userInput'=>trim($this->ussdstring)];
+				    $hereArr=json_encode($hereArr);
+				    
+				    $insertLogReport=mysql_query("Insert into ussd_logs(is_campaign,ussd_log_session_id,ussd_log_msisdn,ussd_log_shortcode,ussd_log_admin_id,ussd_log_details,status,ussd_log_datetime,logtype,apiUrl,apiMethod)VALUES('No','$sess_id','$this->my_msisdn','$this->ussdstring','$aid','$hereArr','$webhookMenu',NOW(),'WEBHOOK','$ussdApiUrl','$ussdAPImethod')",$con)or die(mysql_error());
+				    echo json_encode($apiResponse);
+				    exit;
+					}
+					else
+					{
+					$this->redis->zAdd($this->clientID,$this->score,$sess_id);
+					$this->redis->select(0);
+		    		//$sessDetails=$this->redis->hgetall($sess_id);
+		    		$this->my_msisdn=$msisdn;
+
+					$this->newSessionRequest($ussdstring,$sess_id,$aid);
+					}
+				    }//sessionid==false
+				    }//currentCount vs allowedSessions
+				    else
+				    {
+				    	echo "Concurrent Session Limit Reached";
+				    	exit;
+				    }   
+					}//canTraverse
+
+			   
+				}//newpull
+				else//continue
+				{
+
+					$this->redis->zRem($this->clientID,$sess_id);
+					$this->redis->zAdd($this->clientID,$this->score,$sess_id);
+					$this->redis->select(0);
+					$sessInfo=$this->redis->hgetall($sess_id);
+					
+					if($sessInfo['ussdType']=='CMTSTUDIO')
+					{
+					$this->existingSession($sess_id,$ussdstring,$msisdn);
+			     	}			     	
+			     	elseif($sessInfo['ussdType']=='WEBHOOK')
+			     	{
+			     	$apiResponse=$this->webHookExistingSession($sess_id,$sessInfo,$ussdstring);
+			     	$webhookMenu="Completed";
+			     	$queryString.=",status='Completed'";
+					$arr['ussdType']='WEBHOOK';
+					$arr['ussdstring']=$apiResponse['ussdstring'];
+					$arr['webHookurl']=$sessInfo['webHookurl'];
+					$arr['apiMethod']=$sessInfo['apiMethod'];
+					$arr['shortCode']=$this->ussdstring;
+					$arr['isfinal']=$apiResponse['isfinal'];
+					//$arr['counter']=$sessInfo['counter']+1;
+					$this->redis->zAdd($this->clientID,$this->score,$sess_id);
+					$this->redis->select(0);
+					$this->redis->HMSET($sess_id,$arr);
+					$this->redis->expire($sess_id,60);
+					//echo $arr['ussdstring'];*/
+					if($apiResponse['isfinal']=="false")
+					{
+						$webhookMenu="Incomplete";
+						$queryString.=",status='Incomplete'";
+					}
+				    $checkifExist=mysql_query("SELECT ussd_log_id,ussd_log_details from ussd_logs Where ussd_log_session_id='$sess_id'",$con);
+				    $rowlogDetails=mysql_fetch_array($checkifExist);
+					$logDetails=$rowlogDetails['ussd_log_details'];
+					$logDetails=json_decode($logDetails,true);			
+				    $resHere=$this->redis->hgetall($sess_id);
+				    $this->counter=sizeof($logDetails)+1;
+				    $store=$resHere;
+				    $resHere['counter']=$this->counter;
+				    $this->redis->HMSET($sess_id,$resHere);
+				    $logDetails[$this->counter]=['menu_shown'=>$arr['ussdstring'],'userInput'=>trim($this->ussdstring)];
+				    $logDetails=json_encode($logDetails);
+				    mysql_query("UPDATE ussd_logs SET ussd_log_details='$logDetails'".$queryString." Where ussd_log_session_id='$sess_id'",$con);
+
+				    if($apiResponse['isfinal']=='true')
+				    {
+				    $this->redis->DEL($sess_id);
+					$this->redis->select(1);
+					$this->redis->zRem($this->clientID,$this->sess_id);
+				    }
+				    
+				    echo json_encode($apiResponse);	
+				    exit;
+			     	}
+				}
+
+			}//alreadyNotExist
+			else
+			{
+				if($this->canTraverse($con,$aid))
+					{
+						$code= substr($ussdstring, 1, -1);
+					mysql_select_db('ussd_cmt',$con);
+					$sqlGetTypeDetails=mysql_query("SELECT * from ussd_sc_menu_map Where ussd_short_code='$code'",$con);
+					$res=mysql_fetch_array($sqlGetTypeDetails);
+					$ussdType=$res['ussd_type'];
+					$ussdApiUrl=$res['api_url'];
+					$ussdAdminId=$res['admin_id'];
+					$ussdAPImethod=$res['api_type'];
+					$apinature=$res['type_of_api'];
+					if($ussdType=="API")
+					{
+					$apiResponse=$this->initiateWebHook($ussdApiUrl,$this->ussdstring,$adminUsername,$adminPass,$this->my_msisdn,$ussdAPImethod,$sess_id);
+					$webhookMenu="Complete";
+					if($apiResponse['isfinal']!="true")
+					{
+					$arr['ussdType']='WEBHOOK';
+					$webhookMenu="Incomplete";
+					//$arr['status']=$status;
+					$arr['ussdstring']=$apiResponse['ussdstring'];
+					$arr['webHookurl']=$ussdApiUrl;
+					$arr['apiMethod']=$ussdAPImethod;
+					$arr['shortCode']=$this->ussdstring;
+					$arr['isfinal']=$apiResponse['isfinal'];
+					$arr['counter']='1';
+					//$this->counter='1';
+					$this->redis->zAdd($this->clientID,$this->score,$sess_id);
+					$this->redis->select(0);
+					$this->redis->HMSET($sess_id,$arr);
+					$this->redis->expire($sess_id,60);
+					//echo $arr['ussdstring'];*/
+					
+				    }
+				    $hereArr[$arr['counter']]=['menu_shown'=>$arr['ussdstring'],'userInput'=>trim($this->ussdstring)];
+				    $hereArr=json_encode($hereArr);
+				    
+				    $insertLogReport=mysql_query("Insert into ussd_logs(is_campaign,ussd_log_session_id,ussd_log_msisdn,ussd_log_shortcode,ussd_log_admin_id,ussd_log_details,status,ussd_log_datetime,logtype,apiUrl,apiMethod)VALUES('No','$sess_id','$this->my_msisdn','$this->ussdstring','$aid','$hereArr','$webhookMenu',NOW(),'WEBHOOK','$ussdApiUrl','$ussdAPImethod')",$con)or die(mysql_error());
+				    echo json_encode($apiResponse);
+				    exit;
+					}
+					else
+					{
+					$this->redis->zAdd($this->clientID,$this->score,$sess_id);
+					$this->redis->select(0);
+		    		//$sessDetails=$this->redis->hgetall($sess_id);
+		    		$this->my_msisdn=$msisdn;
+
+					$this->newSessionRequest($ussdstring,$sess_id,$aid);
+					}
+					}//can traverse
+			}
+		}
+		catch(Exception $e)
+		{
+			echo $e;
+			exit;
+		}
+		
+		
+
+	}
+
+	private function canTraverse($con,$aid)
+	{
+				$error=false;
+		        mysql_select_db("db_CMS",$con);	
+				$sqlgetadmin=mysql_query("SELECT ussd_services,ussd_bolton_id from admins Where admin_id='$aid'LIMIT 1",$con)or die(mysql_error());
+			    $resdetails=mysql_fetch_array($sqlgetadmin);
+			    $ussdService=$resdetails['ussd_services'];
+			    $bolton_id=$resdetails['ussd_bolton_id'];
+			    
+			    if($ussdService=='Yes' && !empty($bolton_id))
+			    {		
+
+				$sqlBoltonDetails=mysql_query("SELECT free_sms as concurrent_session,per_sms_rate as allowed_menu_levels from sms_bundles Where bundle_id='$bolton_id' LIMIT 1",$con);
+				$resbolton=mysql_fetch_array($sqlBoltonDetails);
+				$this->allowedSessions=$resbolton['concurrent_session'];
+				$this->allowedlevels=$resbolton['allowed_menu_levels'];
+
+				mysql_select_db("ussd_cmt",$con);
+				$sqlvalidity=mysql_query("SELECT bolton_expiry_date from admin_ussd_bolton_history Where admin_id='$aid' AND bolton_bundle_id='$bolton_id' ORDER BY id DESC LIMIT 1",$con)or die(mysql_error());
+				$resValidity=mysql_fetch_assoc($sqlvalidity);
+				if(strtotime($resValidity['bolton_expiry_date'])<=strtotime(date("Y-m-d")))
+				{
+					echo "USSD Tarrif Expired Please Contact Admin";
+					$error=true;
+					exit;
+				}
+			    }
+			    else
+			    {
+				echo "USSD SERVICE NOT ALLOWED TO THIS CUSTOMER Or Tarrif Not Allocated Please Contact Admin";
+				$error=true;
+				exit;
+			    }
+			    return true;
+	}
+	//$this->webHookCreateNewSession($apiResponse['SessionId'],$apiResponse['status'],$apiResponse['Notification'],$apiResponse['keepAlive']);
+	private function webHookExistingSession($sess_id,$sessInfo,$ussdstring)
+	{
+		$apiMethod=$sessInfo['apiMethod'];
+		$api_url=$sessInfo['webHookurl'];
+		//print_r($sessInfo);
+		if($apiMethod=='GET')
+		{
+			$url=$url."?&MobileNo=".$this->my_msisdn."&SessionId=".$sess_id."&UserInput=".$this->ussdstring."&ShortCode=".$sessInfo['shortCode'];
+		$response=$this->httpGet($url);
+		//json_decode($response));
+		//$sessId=rand(0,10000);
+		if($sessInfo['counter']=='2')
+		{
+		return ['sessionid'=>$sess_id,'ussdstring'=>"Oh You Are Either Good Or Bad",'dcs'=>"15",'isfinal'=>"true","timeout"=>"60000"];	
+		}
+		return ['sessionid'=>$sess_id,'ussdstring'=>"Press 3 For Good\nPress 4 For Bad",'dcs'=>"15",'isfinal'=>"false","timeout"=>"60000"];
+
+		}
+		elseif($apiMethod=='SOAP')
+		{
+		
+		/*$client = new nusoap_client($api_url, 'wsdl');
+		$err = $client->getError();
+		if($err)
+		{
+			return ['sessionid'=>$sess_id,'ussdstring'=>"Error AT API End",'dcs'=>'15','isfinal'=>'true','timeout'=>'60000'];
+		}
+		else
+		{
+			$paramsArr=array('sessionId'=>$sess_id,'status'=>'0','userInput'=>$this->ussdstring);
+			$soapResponse=$client->call('ussdContinue',$paramsArr);
+			$msg=$soapResponse['Message'];
+			$multiLng=$soapResponse['multiLingual'];
+			$isfn=$soapResponse['isfinal'];
+			$dcs=($multiLng=="false")?"15":"72";
+			return ['sessionid'=>$sess_id,'ussdstring'=>$msg,'dcs'=>$dcs,'isfinal'=>$isfn,'timeout'=>'60000'];
+
+		}*/	
+		if($sessInfo['counter']=='2')
+		{
+		return ['sessionid'=>$sess_id,'ussdstring'=>"This Is 2nd Level Continue Ussd Request",'dcs'=>"15",'isfinal'=>"true","timeout"=>"60000"];	
+		}
+		return ['sessionid'=>$sess_id,'ussdstring'=>"This Is 3rd Level Continue Ussd Request",'dcs'=>"15",'isfinal'=>"false","timeout"=>"60000"];
+		}
+		else
+		{
+			$params = array(
+   				"Username"  =>$username,
+   				"Password"  =>$adminPass,
+   				"ShortCode" =>$ussdCode,
+   				"MobileNo"	=>$mobile,
+   				"UserInput"	=>$this->ussdstring,
+   				"SessionId" =>$sess_id
+			);
+			$response=$this->httpPost($apiUrl,$params);
+			//return $response;
+			if($sessInfo['counter']=='2')
+		{
+		return ['sessionid'=>$sess_id,'ussdstring'=>"Restful USSD Level 3",'dcs'=>"15",'isfinal'=>"true","timeout"=>"60000"];	
+		}
+		return ['sessionid'=>$sess_id,'ussdstring'=>"Restful USSD Level 2 ",'dcs'=>"15",'isfinal'=>"false","timeout"=>"60000"];
+		}
+		
+	}
+	private function webHookCreateNewSession($sess_id,$status,$responseText,$keepAlive,$url,$apitype,$username,$pass)
+	{
+		$arr['ussdType']='WEBHOOK';
+		//$sess_id;
+		$arr['status']=$status;
+		$arr['ussdstring']=$responseText;
+		$arr['webHookurl']=$url;
+		$arr['apiMethod']=$apitype;
+		$arr['shortCode']=$this->ussdstring;
+		$arr['username']=$username;
+		$arr['password']=$pass;
+		if($keepAlive==1)
+		{
+			$arr['final']=0;
+		}
+		else
+		{
+			$arr['final']=1;
+		}
+		//$arr['final']=$keepAlive;
+		//print_r($arr);
+		$this->redis->HMSET($sess_id,$arr);
+		$this->redis->expire($sess_id,60);
+		echo $arr['ussdstring'];
+		//exit;
+	}
+
+	private function initiateWebHook($url,$ussdCode,$username,$adminPass,$mobile,$api_type,$sess_id="")
+	{
+		//echo "INITIATE HERE";
+
+		if($api_type=='GET')
+		{
+			//echo "Then Here";
+		$url=$url."?username=".$username."&password=".$adminPass."&shortCode=".$ussdCode."&MobileNo=".$mobile;
+		$response=$this->httpGet($url);
+		//json_decode($response));
+		return ['sessionid'=>$sess_id,'ussdstring'=>"API MENU\nPress 1 For Ok\nPress 2 For Not Ok",'dcs'=>"15",'isfinal'=>"false","timeout"=>"60000"] ;
+	    }
+	    else
+	    {
+	    	$params = array(
+   				"username"  =>$username,
+   				"password"  =>$adminPass,
+   				"shortCode" =>$ussdCode,
+   				"MobileNo"	=>$mobile
+			);
+			$response=$this->httpPost($url,$params);
+			return $response;
+	    }
+	}
+
+	private function httpGet($url)
+	{
+	$headers = array();
+	array_push($headers,"Expect: ");
+	array_push($headers,"Content-Type: application/json");
+	array_push($headers,"Connection: Keep-Alive");
+    $ch = curl_init();  
+    curl_setopt($ch,CURLOPT_URL,$url);
+    curl_setopt($ch,CURLOPT_RETURNTRANSFER,true);
+    curl_setopt($ch,CURLOPT_HEADER, false);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers); 
+    $output=curl_exec($ch);
+    curl_close($ch);
+    return $output;
+	}
+
+	private function httpPost($url,$params)
+	{
+		$headers = array();
+		array_push($headers,"Expect: ");
+		array_push($headers,"Content-Type: application/json");
+		array_push($headers,"Connection: Keep-Alive");
+		 $ch = curl_init();  
+   		 curl_setopt($ch,CURLOPT_URL,$url);
+    	 curl_setopt($ch,CURLOPT_RETURNTRANSFER,true);
+         curl_setopt($ch,CURLOPT_HEADER, false); 
+         curl_setopt($ch, CURLOPT_POST, count($params));
+         curl_setopt($ch, CURLOPT_POSTFIELDS, $params);    
+         $output=curl_exec($ch);
+         curl_close($ch);
+    	 return $output;
+	}
+
+	private function runCMTstudioMEnu($sess_id,$ussdstring,$msisdn)
+	{
+		try
+		{
+		
+		}
+		catch(Exception $ex)
+		{
+			echo $ex;
+			exit;
+		}
+	}
+
+
+	private function existingSession($sess_id,$ussdstring,$msisdn)
+	{
+				//echo "Came here";
+				$this->redis->select(0);
+		 		$sessDetails=$this->redis->hgetall($sess_id);
+		 		//echo json_encode($sessDetails);
+				$this->admin_id=$sessDetails['admin_id'];
+				$this->menu_id =$sessDetails['menuId'];
+				//$this->menu=parent::parseUssd($this->menu_id);
+				/*$this->arr=json_decode($sessDetails['completeMenu']);
+				$this->arr=json_decode(json_encode($this->arr), true);*/
+				$this->menu=parent::parseUssd($this->menu_id);
+				$this->arr=json_decode($this->menu);
+				$this->arr=json_decode(json_encode($this->arr), true);
+				$this->continueOrExit($sessDetails,$sess_id,$ussdstring,$msisdn);
+	}
+
+
+	private function newSessionRequest($ussdstring,$sess_id,$aid)
+	{
+		//echo "new sess";
+				
+				$checkCodeExists=$this->_checkWhetherShortCodeExistsORNot($ussdstring,$aid);
+				//echo json_encode($checkCodeExists);
+				if(is_array($checkCodeExists))
+				{
+					//echo "Here";
+				$this->menu_id=$checkCodeExists[0];
+				$this->admin_id=$checkCodeExists[1];
+				$this->menu=parent::parseUssd($this->menu_id);
+				$this->arr=json_decode($this->menu);
+				$this->arr=json_decode(json_encode($this->arr), true);
+				$this->createNewSession($sess_id);
+
+			    }
+			    elseif($checkCodeExists=='MENU LEVELS EXCEED ALLOWED LEVELS')
+			    {
+			    	echo $checkCodeExists;
+			    	$this->redis->select(1);
+			    	$this->redis->zRem($this->clientID,$this->sess_id);
+			    	exit;
+			    }
+			    else
+			    {
+			    	echo "INVALID SHORT CODE";
+			    	$this->redis->select(1);
+			    	$this->redis->zRem($this->clientID,$this->sess_id);
+			    	exit;
+			    }	
+	}
+
+	private function _checkWhetherShortCodeExistsORNot($code,$aid)
+	{
+
+		$code= substr($code, 1, -1);
+		$this->sc=$code;
+		mysql_select_db('ussd_cmt',$this->conn);
+		$queryCheck=mysql_query("SELECT * from ussd_sc_menu_map Where ussd_short_code ='$code'");
+		if(mysql_num_rows($queryCheck)>'0')
+		{
+			$row=mysql_fetch_array($queryCheck);
+			$menuId=$row['menu_id'];
+			$adminId=$row['admin_id'];
+			if($row['ussd_type']=='Menu')
+			{
+			mysql_select_db('db_CMS',$this->conn);
+			$sqlgetMenuLength=mysql_query("SELECT max_menu_levels from ussd_menu Where id='$menuId'",$this->conn);
+			$resLength=mysql_fetch_assoc($sqlgetMenuLength);
+			$menuLength=$resLength['max_menu_levels'];
+			if($this->allowedlevels>=$menuLength)
+			{
+			 return[$menuId,$adminId];
+			}
+			else
+			{
+				return "MENU LEVELS EXCEED ALLOWED LEVELS";
+			}
+
+			
+
+			//return[$menuId,$adminId];
+			}
+			else
+			{
+				return false;
+			}
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+	private function createNewSession($sess_id)
+	{
+		 //echo "Happening";
+		 $arr=json_decode($this->menu);
+		 $arr=json_decode(json_encode($arr), true);
+		 $myArr['menuId']=$this->menu_id;
+		 $myArr['adminId']=$this->admin_id;
+		 $this->commonFunction($sess_id,$this->arr['parent']);
+		 
+
+	}
+
+	private function continueOrExit($sessDetails,$sess_id,$ussdstring,$msisdn)
+{				
+				//echo json_encode($sessDetails);
+	            if($sessDetails['final']==false)
+	            {
+
+				$allowed_options=explode(",",$sessDetails['allowed_options']);
+				$nextNodes=explode(",",$sessDetails['nextNodes']);
+				$nt=$sessDetails['nodeType'];
+				if($nt=='Start' || $nt=='Menu' || $nt=='End')
+				{
+				  $res=$this->redis->hgetall($sess_id);
+				  
+				 
+				  if($res['errorCountThisNode']>1 || $res['errorCountThisNode']==null)
+				  {
+				  	$res['errorCountThisNode']='0';
+				  	$this->redis->HMSET($sess_id,$res);
+
+				  }
+				  $key=array_search((int)$ussdstring,$allowed_options);
+				  if(strlen($key)<>'0')
+				  {
+				  	$showThisNode=$nextNodes[$key];
+					$this->commonFunction($sess_id,$showThisNode);
+				  }
+				  else
+				  {
+				  	if(!empty($ussdstring))
+				  {
+				  	if($sessDetails['errorCountThisNode']<='2')
+				  	{
+				  		$sessDetails['errorCountThisNode']=$sessDetails['errorCountThisNode']+1;
+				  		$this->redis->HMSET($sess_id,$sessDetails);
+				  		$message="Input Invalid ! Please Enter Valid Value";
+
+				  		$this->commonFunction($sess_id,$sessDetails['default'],$message);
+
+				  	}
+				  	else
+				  	{
+				  		$res=$this->redis->hgetall($sess_id);
+				  		$res['final']=true;
+				  		$this->redis->HMSET($sess_id,$res);
+				  		//$this->redis->DEL($sess_id);
+				  		$m="SESSION DESTROYED ! Too Many Invalid Inputs.";
+				  		$this->_storeLogsAndCloseSession($m,$sess_id);
+				  		
+				  	}
+				  }
+				  else
+				  {
+				  		$res=$this->redis->hgetall($sess_id);
+				  		$res['final']=true;
+				  		$this->redis->HMSET($sess_id,$res);
+				  		//$this->redis->DEL($sess_id);
+				  		$m="Session End";
+				  		$this->_storeLogsAndCloseSession($m,$sess_id);
+				  }
+
+
+				  }
+			    }
+			    elseif($nt=='Input')
+			    {
+			    	$resJson=$sessDetails;
+    				$resJson['UserInput']=$ussdstring;
+    				$resJson[$resJson['paramPropName']]=$ussdstring;
+    				$this->redis->HMSET($sess_id,$resJson);
+    				$res=$this->redis->hgetall($sess_id);
+    				//echo json_encode($res);
+    				//exit;
+    				//INPUT ADD CODE
+			    	foreach ($allowed_options as $key => $value) {
+					if(!empty($ussdstring))
+					{
+						$showThisNode=$nextNodes[$key];
+						$this->commonFunction($sess_id,$showThisNode);
+						
+					}
+
+				  }
+			    }
+			    elseif($nt=='API')
+			    {
+			    $resJson=$sessDetails;
+			    }
+			    }
+}
+
+private function replaceVariable($body,$needleStart,$needleEnd,$replacement){
+  while(strpos($body,$needleStart)){
+      $start = strpos($body,$needleStart);
+      $end = strpos($body,$needleEnd);
+      $body = substr_replace($body,$replacement,$start,$end-$start+1);
+  }
+  return $body;
+}
+
+private function _storeLogsAndCloseSession($m,$sess_id)
+{
+	$queryString="";
+	$resHere=$this->redis->hgetall($sess_id);
+	mysql_select_db('ussd_cmt',$this->conn);	
+    $checkifExist=mysql_query("SELECT ussd_log_id,ussd_log_details from ussd_logs Where ussd_log_session_id='$sess_id'");
+    if(mysql_num_rows($checkifExist)>'0')
+				{
+					$queryString.=",status='Incomplete'";
+					$rowlogDetails=mysql_fetch_array($checkifExist);
+					$logDetails=$rowlogDetails['ussd_log_details'];
+					$logDetails=json_decode($logDetails,true);					
+				    //$resHere=$this->redis->hgetall($sess_id);
+				    $store=$resHere;
+				    $this->counter=$resHere['counter']+1;
+				    $resHere['counter']=$this->counter;
+				    $this->redis->HMSET($sess_id,$resHere);
+				    $logDetails[$this->counter]=['error'=>true,'error_reason'=>$m,'menuEnd'=>true,'userInput'=>trim($this->ussdstring)];
+				    $logDetails=json_encode($logDetails);
+				    mysql_query("UPDATE ussd_logs SET ussd_log_details='$logDetails'".$queryString." Where ussd_log_session_id='$sess_id'");
+				    $resAPI=$this->redis->hgetall($sess_id);
+				 }
+
+	$this->redis->DEL($sess_id);
+	$this->redis->select(1);
+	$this->redis->zRem($this->clientID,$sess_id);
+	echo $m;
+
+}
+
+
+private function _hitApi($apiurl,$url,$method,$p="",$pv="",$sess_id)
+{
+	//echo $url;
+	$arr['responseCode']='200';
+	$arr["message_".$url]="20000000000 PKR";
+	$res=$this->redis->hgetall($sess_id);
+	$res["message_".$url]="20000000000 PKR";
+	$res['apiCompleteUrl']=$apiurl;
+	$res['url']=$url;      	
+	$this->redis->HMSET($sess_id,$res);
+	$res=$this->redis->hgetall($sess_id);
+	//echo json_encode($res);
+
+	return [$arr,$res];
+}
+
+private function callExternalAPI($retArr)
+{
+$msisdn=$this->checkNumber($retArr['msisdn']);
+$retArr['msisdn']=$msisdn;
+$headers = array();
+array_push($headers,"Expect: ");
+array_push($headers,"Connection: Keep-Alive");
+array_push($headers,"Content-Type: application/json");
+$url="http://10.200.207.88:8888/pushussd";
+$ch = curl_init($url);			
+curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, FALSE);
+curl_setopt($ch, CURLOPT_HEADER, FALSE);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1 );
+curl_setopt($ch, CURLOPT_TIMEOUT, 300);
+curl_setopt($ch, CURLINFO_HEADER_OUT, true);
+curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+curl_setopt( $ch, CURLOPT_POSTFIELDS,json_encode($retArr));
+$response= curl_exec($ch);
+//echo "<pre>";
+//print_r($response);
+curl_close($ch);
+return $response;
+
+}
+
+private function checkNumber($mobile_no)
+{
+	if (strpos($mobile_no, "\r") !== false) {
+		$mobile_no=substr($mobile_no,0,strlen($mobile_no)-1);
+    }
+	$strlen = strlen($mobile_no);
+				if($strlen==10)
+				{
+						$mobile_no = "92".$mobile_no;                  
+				}
+				else if($strlen==11)
+				{
+						//$mobile_no = $mobile_no;
+						$mobile_no = "92".substr($mobile_no,1,12);
+				}
+				else if($strlen==12)
+				{
+						$mobile_no = "92".substr($mobile_no,2,12);
+				}
+				else if($strlen==13)
+				{
+						$mobile_no = "92".substr($mobile_no,3,12);
+				}
+				else if($strlen==14)                
+				{
+						$mobile_no = "92".substr($mobile_no,4,12);
+				}
+				else
+				{
+						$mobile_no = $mobile_no;
+				}
+				return $mobile_no;
+}
+
+private function commonFunction($sess_id,$parent,$Errormessage="")
+{	
+		
+		 $start=$this->arr[$parent];
+
+		 if($start['type']=='Back')
+		 {
+		 	$start=$this->arr[$start['backNode']];
+		 }
+		 $currentNodedetails['nodeType']=$start['type'];
+		 if($start['type']=='Start' || $start['type']=='Menu')
+		 {
+		 $description="";
+		 $descArr=explode("/n/",$start['descp']);
+		 if(sizeof($descArr)>0)
+		 {
+		 foreach ($descArr as $key => $value) {
+		 	if($key!=sizeof($descArr)-1)
+		 	{
+		 		$description.=$value."\n";
+		 	}
+		 	else
+		 	{
+		 		$description.=$value;
+		 	}
+		 }
+		 }
+		 else
+		 {
+		 $description=$start['descp'];
+		 }
+		 $optionsToShow=addslashes($description);
+		 $optArr=explode(" ",$optionsToShow);
+		 foreach ($optArr as $key => $value) {
+   			if(preg_match("/{[A-Za-z]*}/",$value))
+   				{
+    			$startPOS=strrpos($value,"{");
+    			$end=strpos($value,"}");
+    			$val=substr($value,$startPOS+1,$end-2);
+    			$res=$this->redis->hgetall($sess_id);
+    			$savedVal=$res[$val];
+    			$optArr[$key]=trim($savedVal);
+   				}
+		 }
+		 if(!empty($Errormessage))
+		 {
+		 $optionsToShow=$Errormessage."\n";
+		 $optionsToShow.=implode(" ",$optArr)."\n";
+		 }
+		 else
+		 {
+		 $optionsToShow=implode(" ",$optArr)."\n";	
+		 }
+		 foreach ($start['options'] as $key => $value) {
+		 	if($key<>"default" && $key<>'error')
+		 	{
+		 		if($value['action']=='jump' || $value['action']=='Back')
+		 		{
+		 	    $toNodedetails=$this->arr[$value['toNode']]['descp'];
+		 	    //$optionsToShow.="Press ".$key." to ".$value['selectedAction']."\n";
+		 	    $currentNodedetails['allowed_options'][]=$key;
+		 	    $currentNodedetails['nextNodes'][]=$value['toNode'];
+		        }
+		    }
+		    elseif($key=='default')
+		    {
+		    	
+		    	$currentNodedetails['default']=$value['toNode'];
+	
+		    }
+		    else
+		    {
+		    	$currentNodedetails['error']="repeat 3 times";
+		    }
+		}
+		
+		$result[]=$optionsToShow;
+		$result[]=$currentNodedetails;
+	    }
+	    elseif($start['type']=='End')
+	    {
+	    	//echo json_encode($start);
+	     $description="";
+		 $descArr=explode("/n/",$start['descp']);
+		 if(sizeof($descArr)>0)
+		 {
+		 foreach ($descArr as $key => $value) {
+		 	if($key!=sizeof($descArr)-1)
+		 	{
+		 		$description.=$value."\n";
+		 	}
+		 	else
+		 	{
+		 		$description.=$value;
+		 	}
+		 }
+		}
+		else
+		{
+			$description=$start['descp'];
+		}
+	    	$result[]=$description;
+	    	$result[]=$currentNodedetails;
+	       	$res=$this->redis->hgetall($sess_id);
+	        $res['nodeType']="End";
+	       	$res['endMessage']=$start['descp'];
+	       	$this->redis->HMSET($sess_id,$res);
+	    }
+	    elseif($start['type']=='Input')
+	    {
+	    	
+	    	$optionsToShow=$start['InputMessage'];
+	    	$currentNodedetails['allowed_options'][]="Success";
+		 	$currentNodedetails['nextNodes'][]=$start['options']['Success']['toNode'];
+		 	$result['UserInput']=$ussdstring;
+		 	$result['paramPropName']=$start['paramPropName'];
+		 	$result[$start['paramPropName']]="";
+		 	$result[]=$optionsToShow;
+		    $result[]=$currentNodedetails;
+	    }
+	    elseif($start['type']=='API')
+	    {
+	    	$apiUrl=$start['apiUrl'];
+	    	$oldUrl=$start['apiUrl'];
+	    	
+	    	$apiMethod=$start['apiMethod'];
+	    	$params=explode(",",$start['params']);
+	    	$paramsVal=explode(",",$start['paramsVal']);
+	    	
+	    	foreach ($paramsVal as $key => $value) {	
+   			if(preg_match("/{[A-Za-z]*}/",$value))
+   				{
+    			$startPOS=strrpos($value,"{");
+    			$end=strpos($value,"}");
+    			$val=substr($value,$startPOS+1,$end-2);
+    			$res=$this->redis->hgetall($sess_id);
+    			$savedVal=$res[$val];
+    			$params[$key]=trim($val);
+    			$paramsVal[$key]=trim($savedVal);
+   				}
+		 	}
+
+		 	//print_r($params);
+	    	//print_r($paramsVal);
+
+	    	if($apiMethod=='GET')
+	    	{
+	    	if($start['ttlParams']>0)
+	    	{
+	    		
+	    		for($t=0;$t<sizeof($params);$t++)
+	    		{
+	    			if($t=='0')
+	    			{
+	    			$apiUrl.="?".$params[$t]."=".$paramsVal[$t];
+	    		    }
+	    		    else
+	    		    {
+	    		    $apiUrl.="&".$params[$t]."=".$paramsVal[$t];	
+	    		    }
+	    		}
+	    	}
+	    	
+	    	$apiResponse=$this->_hitApi($apiUrl,$oldUrl,$apiMethod,$res,$sess_id);
+	       }
+	       else
+	       {
+	       	$apiResponse=$this->_hitApi($apiUrl,$oldUrl,$apiMethod,$params,$paramsVal,$res,$sess_id);
+	       }
+	       if($apiResponse[0]['responseCode']=="200")
+	       {
+	       	$res=$apiResponse[1];
+	       	
+	       	$res['nodeType']='API';
+	       	$this->redis->HMSET($sess_id,$res);
+	       	$res=$this->redis->hgetall($sess_id);
+	       	
+	       	$currentNodedetails['nextNodes'][]=$start['options']['Success']['toNode'];
+	       	
+	       	mysql_select_db('ussd_cmt',$this->conn);	
+			$checkifExist=mysql_query("SELECT ussd_log_id,ussd_log_details from ussd_logs Where ussd_log_session_id='$sess_id'");
+			$queryString="";
+			$queryString.=",status='Incomplete'";
+			if(mysql_num_rows($checkifExist)>'0')
+				{
+					$rowlogDetails=mysql_fetch_array($checkifExist);
+					$logDetails=$rowlogDetails['ussd_log_details'];
+					$logDetails=json_decode($logDetails,true);					
+				    $resHere=$this->redis->hgetall($sess_id);
+				    $store=$resHere;
+				    $this->counter=$resHere['counter']+1;
+				    $resHere['counter']=$this->counter;
+				    $this->redis->HMSET($sess_id,$resHere);
+				    $options=$store['apiCompleteUrl'];
+				    $prop='message_'.$store['url'];
+				    $logDetails[$this->counter]=['apiUrl'=>$options,'apiResponse'=>$store[$prop]];
+				    $logDetails=json_encode($logDetails);
+				    mysql_query("UPDATE ussd_logs SET ussd_log_details='$logDetails'".$queryString." Where ussd_log_session_id='$sess_id'");
+				    $resAPI=$this->redis->hgetall($sess_id);
+				 }
+	       	$this->commonFunction($sess_id,$start['options']['Success']['toNode']);
+	       }
+	       else
+	       {
+	       	$currentNodedetails['nextNodes'][]=$start['options']['Error']['toNode'];
+	       	$this->commonFunction($sess_id,$start['options']['Error']['toNode']);
+	       }
+	    	
+	    }
+				$res=$this->redis->hgetall($sess_id);
+				$result['description']=$result[0];
+				$retArr['sessionid']=$sess_id;
+				$retArr['final']=0;
+				$retArr['ussdstring']=$result[0];
+				$retArr['Timeout']='60';
+				$retArr['dcs']='';
+				//$retArr['msisdn']=$this->my_msisdn;
+				$result['allowed_options']=implode(",",$result[1]['allowed_options']);
+				$result['nextNodes']=implode(",",$result[1]['nextNodes']);
+				$result['default']=$result[1]['default'];
+				$result['error']=$result[1]['error'];
+				$result['nodeType']=$result[1]['nodeType'];
+				$result['final']=0;
+				$result['ussdType']='CMTSTUDIO';
+				if($result['nodeType']=='Menu'|| $result['nodeType']=='Start' || $result['nodeType']=='End')
+				{
+				$result['language']=$start['lang'];	
+				}
+				if($start['lang']=='English')
+				{
+					$retArr['dcs']='15';
+					$result['dcs']='15';
+				}
+				elseif($start['lang']=='Multi')
+				{
+					$retArr['dcs']='72';
+					$result['dcs']='72';
+				}
+				//$result['errorCountThisNode']=0;
+				unset($result[0]);
+				unset($result[1]);
+
+				if(sizeof($res)=='0')
+				{
+					//echo json_encode($res)
+					$this->redis->HMSET($sess_id,$result);
+					$this->redis->expire($sess_id,$retArr['Timeout']);
+					$res=$this->redis->hgetall($sess_id);
+					if($res['nodeType']=='Start')
+					{
+						$res['completeMenu']=$this->menu;
+						$this->redis->HMSET($sess_id,$res);
+						$res=$this->redis->hgetall($sess_id);
+						//echo json_encode($res);
+
+
+					}
+					//exit;
+
+				}
+				
+				if($res['nodeType']=='End')
+				{
+					//echo "HERE END";
+					$result['final']=1;
+					$retArr['final']=1;
+					$endMessageArr=explode(" ",$retArr['ussdstring']);
+					$res=$this->redis->hgetall($sess_id);
+		 	    	$res['final']=1;
+		 	    	$res['nodeType']=='End';
+
+		 	    	//echo json_encode($res);
+		 	    	foreach ($endMessageArr as $key => $value) {	
+		 	    	if(preg_match("/{[A-Za-z_.]*}/",$value))
+   					{
+    				$startPOS=strrpos($value,"{");
+    				$end=strpos($value,"}");
+    				$val=substr($value,$startPOS+1,$end-2);
+    				$res=$this->redis->hgetall($sess_id);
+    				$savedVal=$res[$val];
+    				$endMessageArr[$key]=trim($savedVal);
+   					}
+   				    }//end ForEach
+   				
+   					$retArr['ussdstring']=implode(" ", $endMessageArr);
+   					$res['endMessage']=implode(" ",$endMessageArr);
+   					$res['userInput']=$this->ussdstring;
+   					$this->redis->HMSET($sess_id,$res);
+
+		 	    }//END
+
+
+					//echo json_encode($endMessageArr)
+				$result['admin_id']=$this->admin_id;
+				$result['menuId']=$this->menu_id;
+				//echo json_encode($result);
+				$queryString="";
+				mysql_select_db('ussd_cmt',$this->conn);	
+				$checkifExist=mysql_query("SELECT ussd_log_id,ussd_log_details from ussd_logs Where ussd_log_session_id='$sess_id'");
+				if(mysql_num_rows($checkifExist)>'0')
+				{
+					//echo "cameHere";
+					$rowlogDetails=mysql_fetch_array($checkifExist);
+					$logDetails=$rowlogDetails['ussd_log_details'];
+					$logDetails=json_decode($logDetails,true);					
+				    //$resHere=$this->redis->hgetall($sess_id);
+				    $resHere=$res;
+				    $store=$resHere;
+				    //echo json_encode($resHere);
+				    $this->counter=$resHere['counter']+1;
+				    $result['counter']=$this->counter;
+
+				    
+				    //echo "after";
+				    //echo json_encode($store);
+				    if($store['nodeType']=='Menu' || $store['nodeType']=='Input' || $store['nodeType']=='Start')
+				    {
+				    	//echo "string";
+				    	//echo json_encode($resHere);
+				    $queryString.=",status='Incomplete'";
+				    if($resHere['errorCountThisNode']>0)
+				    {
+				    $options= implode(" ",explode("\n",$store['description']));
+				    $logDetails[$this->counter]=['error'=>true,'error_reason'=>'Input Invalid','menu_shown'=>$options,'userInput'=>trim($this->ussdstring)];
+				    
+				    }
+				    else
+				    {
+				    $options= implode(" ",explode("\n",$store['description']));
+				    $logDetails[$this->counter]=['menu_shown'=>$options,'userInput'=>trim($this->ussdstring)];
+				    }
+				    }
+				    else
+				    {
+				    $prev=$this->redis->hgetall($sess_id);
+				    $hereOpt=implode(" ",explode("\n",$prev['description']));
+				    	$logDetails[$this->counter]=['menu_shown'=>$hereOpt,'userInput'=>trim($prev['userInput'])];
+				    	$this->counter=$this->counter+1;
+				    $result['final']=1;
+				    $options=implode(" ",explode("\n",$resHere['endMessage']));
+				    $logDetails[$this->counter]=['menuEnd'=>$result['final'],'endMessage'=>trim($options)];
+				    //echo json_encode($result);
+				    $queryString.=",status='Completed'";
+				    }
+
+				    $this->redis->HMSET($sess_id,$result);
+				    $this->redis->expire($sess_id,$retArr['Timeout']);
+				    
+				    
+				   
+				    $logDetails=json_encode($logDetails);
+				    //echo $logDetails;
+				    mysql_query("UPDATE ussd_logs SET ussd_log_details='$logDetails'".$queryString." Where ussd_log_session_id='$sess_id'");
+				    
+				}
+				else
+				{
+
+					$this->counter=1;
+					$newArr=array();
+					$result['counter']=$this->counter;
+					$this->redis->HMSET($sess_id,$result);
+					$this->redis->expire($sess_id,$retArr['Timeout']);
+				    $resHere1=$this->redis->hgetall($sess_id);
+				    $store=$resHere1;
+
+				    if($store['nodeType']!='API' || $store['node']!='End')
+				    {
+				    $options= implode(" ",explode("\n",$store['description']));
+				    $newArr[$this->counter]=['menu_shown'=>$options,'userInput'=>trim($this->ussdstring)];
+				    }
+				    elseif($store['nodeType']=='API')
+				    {
+				     $options=$store['apiUrl'];
+				     $newArr[$this->counter]=['apiUrl'=>$options];
+				    }
+				    //$nn=implode("")
+				    
+				    $store['description']=$options;
+				    
+				    $newArr=json_encode($newArr);
+					
+					//echo json_encode($connect);
+					
+					$insertLogReport=mysql_query("Insert into ussd_logs(is_campaign,ussd_log_session_id,ussd_log_msisdn,ussd_log_shortcode,ussd_log_admin_id,ussd_log_menu_id,ussd_log_details,status,ussd_log_datetime)VALUES('No','$sess_id','$this->my_msisdn','$this->sc','$this->admin_id','$this->menu_id','$newArr','Incomplete',NOW())");
+				}
+
+				//echo json_encode($result);
+
+				//echo json_encode($result);
+				//echo json_encode($retArr);
+				 //echo json_encode($start)
+				//echo json_encode($result);
+
+				//commented here 28/08/2020
+				/*$storedData=$this->redis->hgetall($sess_id);
+				//echo(json_encode($storedData));
+				if($storedData['chargingLevel']==null)
+				{
+					//echo json_encode($storedData);
+					mysql_select_db("db_CMS",$this->conn);
+					$sqlChargingLevel=mysql_query("SELECT ussd_charging_level from admins Where admin_id='$storedData[admin_id]'");
+					$resChargingLevel=mysql_fetch_assoc($sqlChargingLevel);
+					$chargnLevel=$resChargingLevel['ussd_charging_level'];
+					$storedData['chargingLevel']=$chargnLevel;
+					$storedData['messageCounter']=1;
+					$this->redis->HMSET($sess_id,$storedData);
+					$this->_deductSMS($storedData['admin_id']);
+				}
+				else
+				{
+					
+					if($storedData['messageCounter']<$storedData['chargingLevel'])
+					{
+					$storedData['messageCounter']=$storedData['messageCounter']+1;
+					$this->redis->HMSET($sess_id,$storedData);
+					;
+				    }
+				    else
+				    {
+				    	$storedData['messageCounter']='1';
+				    	$this->redis->HMSET($sess_id,$storedData);
+				    	$this->_deductSMS($storedData['admin_id']);
+				    }
+				}*/
+				//echo json_encode($storedData);
+				//echo $retArr['ussdstring'];
+
+				//echo json_encode($retArr);
+				//hit muhammad api function
+				if($retArr['final']==true)
+				{
+					$retArr['isfinal']="true";
+				}
+				else
+				{
+					$retArr['isfinal']="false";
+				}
+				if(empty($retArr['dcs']) || $retArr['dcs']=="")
+				{
+					$retArr['dcs']="15";
+				}
+				$retArr['timeout']=60*1000;
+				unset($retArr['final']);
+				unset($retArr['Timeout']);
+				
+				//$apiResponse=$this->callExternalAPI($retArr);
+				//echo $apiResponse;
+				if($result['final']==true)
+				{
+					$this->redis->DEL($sess_id);
+					$this->redis->select(1);
+					$this->redis->zRem($this->clientID,$this->sess_id);
+
+				}
+				echo json_encode($retArr);
+		 exit;
+}
+private function _deductSMS($id)
+{
+mysql_select_db("ussd_cmt",$this->conn);
+$sql=mysql_query("SELECT bolton_ussd_used from admin_ussd_bolton_history Where admin_id='$id'");
+$res=mysql_fetch_assoc($sql);
+$used=$res['bolton_ussd_used'];
+$used=$used+1;
+$update=mysql_query("UPDATE admin_ussd_bolton_history SET bolton_ussd_used='$used' Where admin_id='$id'");
+}
+}//end Class
+
+//echo json_decode($_REQUEST);
+$postdata = file_get_contents("php://input");
+$post=json_decode($postdata,true);
+//echo "<pre>";
+//print_r($post);
+//exit;
+//$post=$_POST;
+if(array_key_exists("status",$post));
+{
+	if($post['status']=='700')
+	{
+	$returnArr=array("response"=>"Session Timeout","sessionid"=>$post['sessionid']);
+	echo json_encode($returnArr);
+	exit;
+    }
+    elseif($post['status']=='27')
+	{
+	$returnArr=array("response"=>"Absent Subscriber","sessionid"=>$post['sessionid']);
+	echo json_encode($returnArr);
+	exit;
+    }
+    elseif($post['status']=='503')
+	{
+	$returnArr=array("response"=>"When the HLR or VLR abort the current Dialog with USSDC GW","sessionid"=>$post['sessionid']);
+	echo json_encode($returnArr);
+	exit;
+    }
+    elseif($post['status']=='34')
+	{
+	$returnArr=array("response"=>"System Failure","sessionid"=>$post['sessionid']);
+	echo json_encode($returnArr);
+	exit;
+    }
+    elseif($post['status']=='501')
+	{
+	$returnArr=array("response"=>"When the HLR or VLR Reject the current operation with USSDC GW,which may be because using invalid arguments such as USSD String or IMSI…","sessionid"=>$post['sessionid']);
+	echo json_encode($returnArr);
+	exit;
+    }
+    elseif($post['status']=='9')
+	{
+	$returnArr=array("response"=>"Illegal subscriber","sessionid"=>$post['sessionid']);
+	echo json_encode($returnArr);
+	exit;
+    }
+    else
+    {
+    $usdStr=$post['ussdstring'];
+    $endsWithUssd=substr($usdStr,strlen($usdStr)-1);
+    $startsWithUssd=substr($usdStr,0,1);
+     mysql_select_db("ussd_cmt",$connect);
+    if($startsWithUssd==="*" && $endsWithUssd==="#")
+    {
+    $string=substr($usdStr, 1, -1);
+    $queryCheckString=mysql_query("SELECT admin_id from ussd_sc_menu_map Where ussd_short_code ='$string'",$connect);
+    if(mysql_num_rows($queryCheckString)>0)
+    {
+    	$resString=mysql_fetch_assoc($queryCheckString);
+    	$aid=$resString['admin_id'];
+    	$pullmode=new ussdPullMode($post['sessionid'],$post['ussdstring'],$post['msisdn'],$connect,$aid,"newPull");
+    }
+    else
+    {
+    $returnArr=array("response"=>"Wrong ShortCode","sessionid"=>$post['sessionid']);
+	echo json_encode($returnArr);
+	exit;
+    }
+    }
+    else
+    {
+    $queryCheckSession=mysql_query("SELECT ussd_log_admin_id from ussd_logs Where ussd_log_session_id ='$post[sessionid]'",$connect);
+    if(mysql_num_rows($queryCheckSession)>0)
+    {
+    $resCheckSession=mysql_fetch_assoc($queryCheckSession);
+    $aid=$resCheckSession['ussd_log_admin_id'];
+    $pullmode=new ussdPullMode($post['sessionid'],$post['ussdstring'],$post['msisdn'],$connect,$aid);	
+    }
+    }
+    }
+    }
+
+
+?>
